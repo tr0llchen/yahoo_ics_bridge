@@ -36,8 +36,11 @@ caldav_client = CalDAVClient(
 @app.get("/calendar.ics")
 async def get_calendar_ics(since_days: int = 30, until_days: int = 730):
     """
-    Get events as ICS format: events from `since_days` in the past through
-    `until_days` in the future, including in-progress and recurring events.
+    Get events as ICS format, merged from ALL calendars in the account:
+    events from `since_days` in the past through `until_days` in the
+    future, including in-progress and recurring events. Each event is
+    tagged with CATEGORIES:<calendar name> so calendar apps that support
+    categories can still tell them apart / color them separately.
     On-demand: fetches directly from Yahoo CalDAV.
     """
     try:

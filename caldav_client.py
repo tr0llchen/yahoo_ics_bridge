@@ -216,6 +216,39 @@ class CalDAVClient:
             self._authenticate()
         return self.client.default_calendar()
 
+    def _get_calendar_events(
+        self, calendar: Calendar, window_start: datetime, window_end: datetime
+    ) -> List[CalendarEvent]:
+        """Fetch and expand events from a single calendar within the given window."""
+        # Ask the server to expand recurring events server-side where
+        # supported (RFC4791 CALDAV:expand). Bounded start/end are required
+        # for expand - an open-ended recurrence can't be expanded.
+        events = calendar.search(
+            event=True,
+            start=window_start,
+            end=window_end,
+            expand=True,
+        )
+
+        calendar_events: List[CalendarEvent] = []
+
+        for event in events:
+            try:
+                vobject_instance = event.vobject_instance
+                if not vobject_instance:
+                    continue
+
+                calendar_events.extend(
+                    _expand_calendar_object(
+                        vobject_instance, event.id, calendar.name, window_start, window_end
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Error parsing event {event.id} in calendar {calendar.name}: {e}")
+                continue
+
+        return calendar_events
+
     async def get_events(
         self,
         calendar_id: str = None,
@@ -227,47 +260,41 @@ class CalDAVClient:
         the past through `until_days` in the future. Includes events
         already in progress, and expands recurring events (RRULE) into
         their individual occurrences within the window.
+
+        If `calendar_id` is given, only that calendar is queried. Otherwise
+        ALL calendars in the account are fetched and merged; each event's
+        `calendar_id` field records which calendar it came from so callers
+        (e.g. the ICS generator) can keep them distinguishable.
+
         On-demand: fetches directly from CalDAV.
         """
         if not self.client:
             self._authenticate()
 
-        calendar = self._get_calendar(calendar_id)
-
         now = datetime.now(timezone.utc)
         window_start = now - timedelta(days=since_days)
         window_end = now + timedelta(days=until_days)
 
-        # Ask the server to expand recurring events server-side where
-        # supported (RFC4791 CALDAV:expand). Bounded start/end are required
-        # for expand - an open-ended recurrence can't be expanded.
-        events = calendar.search(
-            event=True,
-            start=window_start,
-            end=window_end,
-            expand=True,
-        )
+        if calendar_id:
+            calendars = [self._get_calendar(calendar_id)]
+        else:
+            calendars = list(self._get_calendars().values())
 
         all_events: List[CalendarEvent] = []
 
-        for event in events:
+        for calendar in calendars:
             try:
-                vobject_instance = event.vobject_instance
-                if not vobject_instance:
-                    continue
-
-                all_events.extend(
-                    _expand_calendar_object(
-                        vobject_instance, event.id, calendar.name, window_start, window_end
-                    )
-                )
+                calendar_events = self._get_calendar_events(calendar, window_start, window_end)
             except Exception as e:
-                logger.warning(f"Error parsing event {event.id}: {e}")
+                logger.warning(f"Error fetching events from calendar {calendar.name}: {e}")
                 continue
 
+            logger.info(f"Calendar '{calendar.name}': {len(calendar_events)} event(s)")
+            all_events.extend(calendar_events)
+
         logger.info(
-            f"Found {len(all_events)} events (past {since_days}d, next {until_days}d, "
-            f"recurring occurrences expanded)"
+            f"Found {len(all_events)} events across {len(calendars)} calendar(s) "
+            f"(past {since_days}d, next {until_days}d, recurring occurrences expanded)"
         )
         return all_events
 

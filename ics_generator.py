@@ -32,14 +32,22 @@ def generate_event_ics(event: CalendarEvent) -> str:
     """
     Generate a single VEVENT block in ICS format.
     """
+    # Qualify the UID with the source calendar so events from different
+    # calendars can never collide when merged into one VCALENDAR (RFC5545
+    # requires UID to be unique within a single ICS file).
+    uid = f"{event.calendar_id}-{event.event_id}" if event.calendar_id else event.event_id
+
     lines = [
         "BEGIN:VEVENT",
-        f"UID:{event.event_id}",
+        f"UID:{_escape_text(uid)}",
         f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
         f"DTSTART:{_format_datetime(event.start)}",
         f"DTEND:{_format_datetime(event.end)}",
         f"SUMMARY:{_escape_text(event.summary)}",
     ]
+
+    if event.calendar_id:
+        lines.append(f"CATEGORIES:{_escape_text(event.calendar_id)}")
 
     if event.description:
         lines.append(f"DESCRIPTION:{_escape_text(event.description)}")
