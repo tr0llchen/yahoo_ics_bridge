@@ -4,6 +4,7 @@ Serves ICS endpoint for a single client with read-write support.
 """
 
 import logging
+from dataclasses import asdict
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -33,13 +34,14 @@ caldav_client = CalDAVClient(
 
 
 @app.get("/calendar.ics")
-async def get_calendar_ics():
+async def get_calendar_ics(since_days: int = 30, until_days: int = 730):
     """
-    Get all future events as ICS format.
+    Get events as ICS format: events from `since_days` in the past through
+    `until_days` in the future, including in-progress and recurring events.
     On-demand: fetches directly from Yahoo CalDAV.
     """
     try:
-        events = await caldav_client.get_future_events()
+        events = await caldav_client.get_events(since_days=since_days, until_days=until_days)
         ics_content = generate_ics(events)
         return Response(
             content=ics_content,
@@ -54,12 +56,14 @@ async def get_calendar_ics():
 
 
 @app.get("/calendar.ics/{calendar_id}")
-async def get_calendar_ics_by_id(calendar_id: str):
+async def get_calendar_ics_by_id(calendar_id: str, since_days: int = 30, until_days: int = 730):
     """
     Get events from a specific calendar.
     """
     try:
-        events = await caldav_client.get_future_events(calendar_id=calendar_id)
+        events = await caldav_client.get_events(
+            calendar_id=calendar_id, since_days=since_days, until_days=until_days
+        )
         ics_content = generate_ics(events)
         return Response(
             content=ics_content,
@@ -74,13 +78,13 @@ async def get_calendar_ics_by_id(calendar_id: str):
 
 
 @app.get("/events")
-async def get_events_json():
+async def get_events_json(since_days: int = 30, until_days: int = 730):
     """
-    Get all future events as JSON (for debugging/inspection).
+    Get events as JSON (for debugging/inspection).
     """
     try:
-        events = await caldav_client.get_future_events()
-        return {"events": [event.dict() for event in events]}
+        events = await caldav_client.get_events(since_days=since_days, until_days=until_days)
+        return {"events": [asdict(event) for event in events]}
     except Exception as e:
         logger.error(f"Error fetching events: {e}")
         raise HTTPException(status_code=500, detail=str(e))

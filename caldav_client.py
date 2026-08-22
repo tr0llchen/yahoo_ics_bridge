@@ -4,7 +4,7 @@ Handles authentication and communication with Yahoo CalDAV endpoint.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List
 from dataclasses import dataclass
 from caldav.objects import Calendar, Event
@@ -28,6 +28,113 @@ class CalendarEvent:
     calendar_id: str
     location: Optional[str] = None
     status: Optional[str] = None
+
+
+def _to_utc_datetime(value) -> datetime:
+    """Normalize a vobject DTSTART/DTEND/RECURRENCE-ID value (date or datetime) to aware UTC."""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=timezone.utc)
+    # date-only value (all-day event)
+    return datetime.combine(value, datetime.min.time()).replace(tzinfo=timezone.utc)
+
+
+def _vevent_fields(vevent) -> dict:
+    return {
+        "summary": str(vevent.summary.value) if hasattr(vevent, "summary") else "",
+        "description": str(vevent.description.value) if hasattr(vevent, "description") else "",
+        "location": str(vevent.location.value) if hasattr(vevent, "location") else None,
+        "status": str(vevent.status.value) if hasattr(vevent, "status") else None,
+    }
+
+
+def _expand_calendar_object(
+    vobject_instance,
+    event_id: str,
+    calendar_name: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> List[CalendarEvent]:
+    """
+    Expand one fetched calendar resource into individual CalendarEvent
+    occurrences within [window_start, window_end]. A resource may hold a
+    single plain VEVENT, or a recurring master (RRULE) plus zero or more
+    overridden-occurrence VEVENTs (RECURRENCE-ID) sharing the same UID.
+    """
+    vevents = list(getattr(vobject_instance, "vevent_list", []))
+    if not vevents and hasattr(vobject_instance, "vevent"):
+        vevents = [vobject_instance.vevent]
+
+    masters = [v for v in vevents if hasattr(v, "rrule") and not hasattr(v, "recurrence_id")]
+    overrides = [v for v in vevents if hasattr(v, "recurrence_id")]
+    singles = [v for v in vevents if not hasattr(v, "rrule") and not hasattr(v, "recurrence_id")]
+
+    results: List[CalendarEvent] = []
+    override_recurrence_ids = set()
+
+    for vevent in overrides:
+        recurrence_dt = _to_utc_datetime(vevent.recurrence_id.value)
+        override_recurrence_ids.add(recurrence_dt)
+
+        start = _to_utc_datetime(vevent.dtstart.value)
+        end = _to_utc_datetime(vevent.dtend.value)
+        if end < window_start or start > window_end:
+            continue
+        results.append(CalendarEvent(
+            event_id=f"{event_id}-{recurrence_dt.isoformat()}",
+            calendar_id=calendar_name,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            **_vevent_fields(vevent),
+        ))
+
+    for vevent in masters:
+        master_start = _to_utc_datetime(vevent.dtstart.value)
+        master_end = _to_utc_datetime(vevent.dtend.value)
+        duration = master_end - master_start
+        fields = _vevent_fields(vevent)
+        is_all_day = not isinstance(vevent.dtstart.value, datetime)
+
+        try:
+            ruleset = vevent.getrruleset(addRDate=True)
+            if is_all_day:
+                raw_occurrences = ruleset.between(
+                    window_start.replace(tzinfo=None), window_end.replace(tzinfo=None), inc=True
+                )
+            else:
+                raw_occurrences = ruleset.between(window_start, window_end, inc=True)
+        except Exception as e:
+            logger.warning(f"Could not expand recurrence for event {event_id}: {e}")
+            continue
+
+        for occurrence in raw_occurrences:
+            occ_start = _to_utc_datetime(occurrence)
+            if occ_start in override_recurrence_ids:
+                continue  # replaced by an override VEVENT, already emitted above
+            occ_end = occ_start + duration
+            results.append(CalendarEvent(
+                event_id=f"{event_id}-{occ_start.isoformat()}",
+                calendar_id=calendar_name,
+                start=occ_start.isoformat(),
+                end=occ_end.isoformat(),
+                **fields,
+            ))
+
+    for vevent in singles:
+        start = _to_utc_datetime(vevent.dtstart.value)
+        end = _to_utc_datetime(vevent.dtend.value)
+        if end < window_start or start > window_end:
+            continue
+        results.append(CalendarEvent(
+            event_id=event_id,
+            calendar_id=calendar_name,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            **_vevent_fields(vevent),
+        ))
+
+    return results
 
 
 class CalDAVClient:
@@ -109,9 +216,17 @@ class CalDAVClient:
             self._authenticate()
         return self.client.default_calendar()
 
-    async def get_future_events(self, calendar_id: str = None) -> List[CalendarEvent]:
+    async def get_events(
+        self,
+        calendar_id: str = None,
+        since_days: int = 30,
+        until_days: int = 730,
+    ) -> List[CalendarEvent]:
         """
-        Fetch all future events from Yahoo Calendar.
+        Fetch events from Yahoo Calendar within a window: `since_days` in
+        the past through `until_days` in the future. Includes events
+        already in progress, and expands recurring events (RRULE) into
+        their individual occurrences within the window.
         On-demand: fetches directly from CalDAV.
         """
         if not self.client:
@@ -119,59 +234,42 @@ class CalDAVClient:
 
         calendar = self._get_calendar(calendar_id)
 
-        # Get all events (Yahoo CalDAV returns all by default)
-        events = calendar.events()
-
-        # Filter for future events
-        future_events = []
         now = datetime.now(timezone.utc)
+        window_start = now - timedelta(days=since_days)
+        window_end = now + timedelta(days=until_days)
+
+        # Ask the server to expand recurring events server-side where
+        # supported (RFC4791 CALDAV:expand). Bounded start/end are required
+        # for expand - an open-ended recurrence can't be expanded.
+        events = calendar.search(
+            event=True,
+            start=window_start,
+            end=window_end,
+            expand=True,
+        )
+
+        all_events: List[CalendarEvent] = []
 
         for event in events:
             try:
-                # Parse event data
-                vobject_event = event.vobject_event
-                if not vobject_event:
+                vobject_instance = event.vobject_instance
+                if not vobject_instance:
                     continue
 
-                # Get start and end times
-                start = vobject_event.vevent.dtstart.value
-                end = vobject_event.vevent.dtend.value
-
-                # Convert to UTC if needed
-                if hasattr(start, 'tzinfo') and start.tzinfo is not None:
-                    start = start.astimezone(timezone.utc)
-                else:
-                    start = datetime.combine(start, datetime.min.time()).replace(tzinfo=timezone.utc)
-
-                if hasattr(end, 'tzinfo') and end.tzinfo is not None:
-                    end = end.astimezone(timezone.utc)
-                else:
-                    end = datetime.combine(end, datetime.min.time()).replace(tzinfo=timezone.utc)
-
-                # Filter future events
-                if start > now:
-                    # Extract event properties
-                    summary = str(vobject_event.vevent.summary.value) if hasattr(vobject_event.vevent, 'summary') else ""
-                    description = str(vobject_event.vevent.description.value) if hasattr(vobject_event.vevent, 'description') else ""
-                    location = str(vobject_event.vevent.location.value) if hasattr(vobject_event.vevent, 'location') else None
-                    status = str(vobject_event.vevent.status.value) if hasattr(vobject_event.vevent, 'status') else None
-
-                    future_events.append(CalendarEvent(
-                        event_id=event.id,
-                        summary=summary,
-                        description=description,
-                        start=start.isoformat(),
-                        end=end.isoformat(),
-                        calendar_id=calendar.name,
-                        location=location,
-                        status=status,
-                    ))
+                all_events.extend(
+                    _expand_calendar_object(
+                        vobject_instance, event.id, calendar.name, window_start, window_end
+                    )
+                )
             except Exception as e:
                 logger.warning(f"Error parsing event {event.id}: {e}")
                 continue
 
-        logger.info(f"Found {len(future_events)} future events")
-        return future_events
+        logger.info(
+            f"Found {len(all_events)} events (past {since_days}d, next {until_days}d, "
+            f"recurring occurrences expanded)"
+        )
+        return all_events
 
     async def create_event(
         self,
