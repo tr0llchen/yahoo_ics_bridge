@@ -80,7 +80,7 @@ class CalDAVClient:
         if not self.client:
             self._authenticate()
 
-        calendars = self.client.calendars()
+        calendars = self.client.principal().calendars()
         for calendar in calendars:
             self.calendars[calendar.name] = calendar
             logger.info(f"Found calendar: {calendar.name}")
