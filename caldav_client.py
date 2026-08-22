@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from dataclasses import dataclass
 from caldav.objects import Calendar, Event
-from caldav import CalDAVClient
+from caldav import DAVClient as CalDAVClient
 
 from config import settings
 
