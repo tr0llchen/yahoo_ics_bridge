@@ -9,6 +9,7 @@ from typing import Optional, List
 from dataclasses import dataclass
 from caldav.objects import Calendar, Event
 from caldav import DAVClient
+from requests.auth import HTTPBasicAuth
 
 from config import settings
 
@@ -50,29 +51,33 @@ class CalDAVClient:
 
     def _authenticate(self) -> "CalDAVClient":
         """Authenticate with Yahoo CalDAV."""
+        # Yahoo's CalDAV endpoint returns 401 on an unauthenticated request
+        # WITHOUT a WWW-Authenticate header. The caldav library only sets up
+        # Basic Auth in response to that header, so it never actually sends
+        # credentials and fails with AuthorizationError even when the
+        # credentials are correct. Passing `auth=` explicitly forces Basic
+        # Auth to be sent on the first request, bypassing that negotiation.
         if settings.AUTH_METHOD == "oauth" and self.oauth_token:
             # OAuth authentication
-            self.client = DAVClient(
-                url=settings.CALDAV_URL,
-                username=self.username,
-                password=self.oauth_token,
-            )
+            used_method = "oauth"
+            password = self.oauth_token
         elif settings.AUTH_METHOD == "app_password" and self.app_password:
             # App password authentication
-            self.client = DAVClient(
-                url=settings.CALDAV_URL,
-                username=self.username,
-                password=self.app_password,
-            )
+            used_method = "app_password"
+            password = self.app_password
         else:
             # Username/password authentication
-            self.client = DAVClient(
-                url=settings.CALDAV_URL,
-                username=self.username,
-                password=self.password,
-            )
+            used_method = "username_password"
+            password = self.password
 
-        logger.info(f"Authenticated with CalDAV using {settings.AUTH_METHOD}")
+        self.client = DAVClient(
+            url=settings.CALDAV_URL,
+            username=self.username,
+            password=password,
+            auth=HTTPBasicAuth(self.username, password),
+        )
+
+        logger.info(f"Authenticated with CalDAV using {used_method}")
         return self
 
     def _get_calendars(self) -> dict:

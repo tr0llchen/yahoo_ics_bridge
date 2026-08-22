@@ -131,13 +131,19 @@ def raw_propfind_test() -> None:
 def caldav_library_test() -> None:
     print("=== caldav library test (principal + calendars) ===")
     from caldav import DAVClient
+    from requests.auth import HTTPBasicAuth
 
     username, password = which_credential_will_actually_be_used()
     if not username or not password:
         print("  -> Skipping: username or password resolved to empty.")
         return
 
-    client = DAVClient(url=settings.CALDAV_URL, username=username, password=password)
+    client = DAVClient(
+        url=settings.CALDAV_URL,
+        username=username,
+        password=password,
+        auth=HTTPBasicAuth(username, password),
+    )
     try:
         principal = client.principal()
         print(f"  -> principal() succeeded: {principal}")
