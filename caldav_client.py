@@ -188,24 +188,41 @@ class CalDAVClient:
         return self
 
     def _get_calendars(self) -> dict:
-        """Fetch all calendars."""
+        """
+        Fetch all calendars, keyed by their unique CalDAV URL.
+
+        Display names are NOT guaranteed unique (an account can have two
+        calendars both named e.g. "Lynn" - shared/subscribed calendars
+        commonly collide like this). Keying by name previously caused
+        same-named calendars to silently overwrite each other in this
+        dict, so only one of them was ever queried - and which one won
+        depended on the non-deterministic order the server returned them
+        in, producing inconsistent event counts between requests.
+        """
         if not self.client:
             self._authenticate()
 
         calendars = self.client.principal().calendars()
         for calendar in calendars:
-            self.calendars[calendar.name] = calendar
-            logger.info(f"Found calendar: {calendar.name}")
+            self.calendars[str(calendar.url)] = calendar
+            logger.info(f"Found calendar: {calendar.name} ({calendar.url})")
 
         return self.calendars
 
     def _get_calendar(self, calendar_id: str = None) -> Calendar:
-        """Get a specific calendar or the default one."""
+        """Get a specific calendar (by URL key or display name) or the default one."""
         if not self.calendars:
             self._get_calendars()
 
-        if calendar_id and calendar_id in self.calendars:
-            return self.calendars[calendar_id]
+        if calendar_id:
+            if calendar_id in self.calendars:
+                return self.calendars[calendar_id]
+            # Fall back to matching by display name. If multiple calendars
+            # share this name, the first one found wins - there's no way
+            # to disambiguate from a name alone.
+            for calendar in self.calendars.values():
+                if calendar.name == calendar_id:
+                    return calendar
 
         # Return first calendar as default
         if self.calendars:
