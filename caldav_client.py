@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from dataclasses import dataclass
 from caldav.objects import Calendar, Event
-from caldav import DAVClient as CalDAVClient
+from caldav import DAVClient
 
 from config import settings
 
@@ -48,25 +48,25 @@ class CalDAVClient:
         self.client = None
         self.calendars = {}
 
-    def _authenticate(self) -> CalDAVClient:
+    def _authenticate(self) -> "CalDAVClient":
         """Authenticate with Yahoo CalDAV."""
         if settings.AUTH_METHOD == "oauth" and self.oauth_token:
             # OAuth authentication
-            self.client = CalDAVClient(
+            self.client = DAVClient(
                 url=settings.CALDAV_URL,
                 username=self.username,
                 password=self.oauth_token,
             )
         elif settings.AUTH_METHOD == "app_password" and self.app_password:
             # App password authentication
-            self.client = CalDAVClient(
+            self.client = DAVClient(
                 url=settings.CALDAV_URL,
                 username=self.username,
                 password=self.app_password,
             )
         else:
             # Username/password authentication
-            self.client = CalDAVClient(
+            self.client = DAVClient(
                 url=settings.CALDAV_URL,
                 username=self.username,
                 password=self.password,
